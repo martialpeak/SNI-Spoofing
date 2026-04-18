@@ -143,4 +143,80 @@ async def handle(incoming_sock: socket.socket, incoming_remote_addr):
                 await asyncio.wait_for(fake_injective_conn.t2a_event.wait(), 2)
                 if fake_injective_conn.t2a_msg == "unexpected_close":
                     return
-                if fake_injective_conn
+                if fake_injective_conn.t2a_msg != "fake_data_ack_recv":
+                    sys.exit("impossible t2a msg!")
+            except asyncio.TimeoutError:
+                return 
+        else:
+            sys.exit("unknown bypass method!")
+
+        fake_injective_conn.monitor = False
+
+        oti_task = asyncio.create_task(relay_main_loop(outgoing_sock, incoming_sock, asyncio.current_task(), b""))
+        await relay_main_loop(incoming_sock, outgoing_sock, oti_task, b"")
+
+    except Exception:
+        traceback.print_exc()
+    finally:
+        if fake_injective_conn:
+            fake_injective_conn.monitor = False
+            fake_injective_connections.pop(fake_injective_conn.id, None)
+        
+        try:
+            outgoing_sock.close()
+        except: pass
+        try:
+            incoming_sock.close()
+        except: pass
+
+async def main():
+    mother_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    mother_sock.setblocking(False)
+    mother_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    mother_sock.bind((LISTEN_HOST, LISTEN_PORT))
+    
+    try:
+        mother_sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        mother_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 11)
+        mother_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 2)
+        mother_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+    except AttributeError:
+        pass
+
+    mother_sock.listen()
+    print(f"Proxy is running on {LISTEN_HOST}:{LISTEN_PORT}...")
+    print(f"Target: {CONNECT_IP}:{CONNECT_PORT} | SNI: {FAKE_SNI.decode()}")
+    print("Waiting for connections...")
+    
+    loop = asyncio.get_running_loop()
+    
+    while True:
+        try:
+            incoming_sock, addr = await loop.sock_accept(mother_sock)
+            incoming_sock.setblocking(False)
+            
+            try:
+                incoming_sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                incoming_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 11)
+                incoming_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 2)
+                incoming_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+            except AttributeError:
+                pass
+                
+            asyncio.create_task(handle(incoming_sock, addr))
+        except Exception:
+            continue
+
+if __name__ == "__main__":
+    if not INTERFACE_IPV4:
+        sys.exit("Error: Could not determine default IPv4 interface. Check your internet connection.")
+        
+    w_filter = "tcp and " + "(" + "(ip.SrcAddr == " + INTERFACE_IPV4 + " and ip.DstAddr == " + CONNECT_IP + ")" + " or " + "(ip.SrcAddr == " + CONNECT_IP + " and ip.DstAddr == " + INTERFACE_IPV4 + ")" + ")"
+    
+    fake_tcp_injector = FakeTcpInjector(w_filter, fake_injective_connections)
+    threading.Thread(target=fake_tcp_injector.run, args=(), daemon=True).start()
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nبرنامه با موفقیت متوقف شد.")
