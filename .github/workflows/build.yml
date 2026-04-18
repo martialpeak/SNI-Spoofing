@@ -27,7 +27,7 @@ jobs:
 
       - name: Build EXE with PyInstaller
         run: |
-          pyinstaller --onefile --console --uac-admin --collect-data pydivert main.py
+          pyinstaller --onefile --console --uac-admin --collect-data pydivert --paths utils main.py
 
       - name: Create Release and Upload
         uses: softprops/action-gh-release@v1
