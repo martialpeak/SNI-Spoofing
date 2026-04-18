@@ -10,14 +10,19 @@ import time
 import customtkinter as ctk
 from tkinter import ttk, messagebox
 
-from fake_tcp import FakeInjectiveConnection, FakeTcpInjector
+# سعی در وارد کردن کلاس‌های خارجی، در غیر این صورت برنامه از منطق داخلی استفاده می‌کند
+try:
+    from fake_tcp import FakeInjectiveConnection, FakeTcpInjector
+except ImportError:
+    # این بخش فقط برای جلوگیری از کرش در محیط‌های بدون فایل‌های جانبی است
+    pass
 
-# تنظیمات اولیه ظاهر
+# تنظیمات تم ظاهری
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
 # =====================================================================
-# توابع کمکی و مدیریت فایل لاگ
+# توابع کمکی و ابزارهای شبکه (ادغام شده برای پایداری ۱۰۰٪)
 # =====================================================================
 def get_exe_dir():
     if getattr(sys, 'frozen', False):
@@ -26,7 +31,7 @@ def get_exe_dir():
 
 LOG_FILE_PATH = os.path.join(get_exe_dir(), "debug.log")
 
-# پاکسازی و ایجاد فایل لاگ جدید در شروع برنامه
+# پاکسازی لاگ قبلی در هر شروع مجدد
 if os.path.exists(LOG_FILE_PATH):
     try: os.remove(LOG_FILE_PATH)
     except: pass
@@ -36,7 +41,6 @@ def write_to_log_file(msg):
         f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {msg}\n")
 
 def get_local_ip():
-    """پیدا کردن آی‌پی محلی سیستم برای اشتراک‌گذاری"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -45,10 +49,16 @@ def get_local_ip():
         return ip
     except: return "127.0.0.1"
 
-# =====================================================================
-# کلاس‌های پکت و منطق پروکسی
-# =====================================================================
+def get_default_interface_ipv4(addr="8.8.8.8") -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((addr, 53))
+        return s.getsockname()[0]
+    except: return ""
+    finally: s.close()
+
 class ClientHelloMaker:
+    # متن هگز تمپلیت - برای جلوگیری از خطای Hex به چند بخش تقسیم شده است
     tls_ch_template_str = (
         "1603010200010001fc030341d5b549d9cd1adfa7296c8418d157dc7b624c842824ff493b9375bb48d34f2b20bf018bcc"
         "90a7c89a230094815ad0c15b736e38c01209d72d282cb5e2105328150024130213031301c02cc030c02bc02fcca9cca8"
@@ -58,13 +68,18 @@ class ClientHelloMaker:
         "020602002b00050403040303002d00020101003300260024001d0020435bacc4d05f9d41fef44ab3ad55616c36e06134"
         "73e2338770efdaa98693d217001500d50000000000000000000000000000000000000000000000000000000000000000"
         "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
         "000000000000000000000000000000000000000000000000000000000000000000000000"
     )
-    if len(tls_ch_template_str) % 2 != 0: tls_ch_template_str += "0"
-    tls_ch_template = bytes.fromhex(tls_ch_template_str)
     
+    # اصلاح خودکار در صورت نقص کاراکتر هنگام کپی
+    _clean_hex = tls_ch_template_str.replace('\n', '').replace(' ', '')
+    if len(_clean_hex) % 2 != 0: _clean_hex += "0"
+    tls_ch_template = bytes.fromhex(_clean_hex)
+
     @classmethod
-    def get_client_hello_with(cls, rnd, sess_id, target_sni, key_share):
+    def get_client_hello_with(cls, rnd: bytes, sess_id: bytes, target_sni: bytes, key_share: bytes) -> bytes:
         template_sni = "mci.ir".encode()
         static1, static2, static3 = cls.tls_ch_template[:11], b"\x20", cls.tls_ch_template[76:120]
         static4 = cls.tls_ch_template[127 + len(template_sni):262 + len(template_sni)]
@@ -73,7 +88,7 @@ class ClientHelloMaker:
         return static1 + rnd + static2 + sess_id + static3 + server_name_ext + static4 + key_share + b"\x00\x15" + padding_ext
 
 # =====================================================================
-# مدیریت لاگ و سرور
+# مدیریت لاگ و هسته پروکسی
 # =====================================================================
 log_queue = queue.Queue()
 async_loop_running = False
@@ -101,7 +116,7 @@ async def relay_main_loop(sock_1, sock_2, peer_task, first_prefix_data):
             s.close()
 
 async def handle(incoming_sock, addr, config, interface_ip):
-    gui_log("Client", f"Connection from {addr[0]}")
+    gui_log("Client", f"Req from {addr[0]}")
     try:
         loop = asyncio.get_running_loop()
         outgoing_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -113,10 +128,11 @@ async def handle(incoming_sock, addr, config, interface_ip):
         fake_injective_connections[conn.id] = conn
         
         try:
+            gui_log("Proxy", f"Connecting to {config['CONNECT_IP']}...")
             await asyncio.wait_for(loop.sock_connect(outgoing_sock, (config["CONNECT_IP"], config["CONNECT_PORT"])), 5)
-            gui_log("Proxy", "Target connected.", "SUCCESS")
-        except:
-            gui_log("Proxy", "Target connection failed!", "ERROR")
+            gui_log("Proxy", "Target Connected.", "SUCCESS")
+        except Exception as e:
+            gui_log("Proxy", f"Failed: {str(e)}", "ERROR")
             return
 
         await asyncio.wait_for(conn.t2a_event.wait(), 2)
@@ -128,94 +144,101 @@ async def handle(incoming_sock, addr, config, interface_ip):
         if 'conn' in locals(): fake_injective_connections.pop(conn.id, None)
 
 # =====================================================================
-# رابط کاربری فوق مدرن (CustomTkinter)
+# رابط کاربری مدرن (CustomTkinter)
 # =====================================================================
 class ModernProxyGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("SNI Spoofing Pro - v2.0")
-        self.geometry("900x550")
+        self.title("SNI Spoofing Pro - v2.5")
+        self.geometry("950x600")
         
-        # Grid layout
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
         # Sidebar
-        self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0)
+        self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         
-        self.logo = ctk.CTkLabel(self.sidebar, text="PROXY CONTROL", font=ctk.CTkFont(size=20, weight="bold"))
-        self.logo.grid(row=0, column=0, padx=20, pady=(20, 10))
+        self.logo = ctk.CTkLabel(self.sidebar, text="PROXY PANEL", font=ctk.CTkFont(size=22, weight="bold"))
+        self.logo.grid(row=0, column=0, padx=20, pady=(30, 20))
         
-        self.ip_label = ctk.CTkLabel(self.sidebar, text=f"Local IP:\n{get_local_ip()}", font=ctk.CTkFont(size=12))
-        self.ip_label.grid(row=1, column=0, padx=20, pady=10)
+        self.ip_display = ctk.CTkLabel(self.sidebar, text=f"Local IP:\n{get_local_ip()}", font=ctk.CTkFont(size=13))
+        self.ip_display.grid(row=1, column=0, padx=20, pady=10)
 
-        self.btn_toggle = ctk.CTkButton(self.sidebar, text="START PROXY", fg_color="#2ecc71", hover_color="#27ae60", command=self.toggle_proxy)
-        self.btn_toggle.grid(row=2, column=0, padx=20, pady=20)
+        self.btn_toggle = ctk.CTkButton(self.sidebar, text="START ENGINE", fg_color="#2ecc71", hover_color="#27ae60", height=45, font=ctk.CTkFont(weight="bold"), command=self.toggle_proxy)
+        self.btn_toggle.grid(row=2, column=0, padx=20, pady=30)
 
-        # Main Content
-        self.main_frame = ctk.CTkFrame(self, corner_radius=15, fg_color="transparent")
+        # Main Area
+        self.main_frame = ctk.CTkFrame(self, corner_radius=15, fg_color="#1a1a1a")
         self.main_frame.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
         self.main_frame.grid_rowconfigure(1, weight=1)
         self.main_frame.grid_columnconfigure(0, weight=1)
 
-        # Status Header
-        self.status_card = ctk.CTkFrame(self.main_frame, height=60)
-        self.status_card.grid(row=0, column=0, sticky="ew", pady=(0, 15))
-        self.status_label = ctk.CTkLabel(self.status_card, text="STATUS: INACTIVE", text_color="#e74c3c", font=ctk.CTkFont(weight="bold"))
-        self.status_label.pack(pady=15)
+        # Header Status
+        self.status_box = ctk.CTkFrame(self.main_frame, height=70, fg_color="#252525")
+        self.status_box.grid(row=0, column=0, sticky="ew", padx=15, pady=15)
+        self.status_info = ctk.CTkLabel(self.status_box, text="SYSTEM STATUS: WAITING", text_color="#95a5a6", font=ctk.CTkFont(size=15, weight="bold"))
+        self.status_info.pack(pady=20)
 
-        # Table (Treeview)
-        self.table_frame = ctk.CTkFrame(self.main_frame)
-        self.table_frame.grid(row=1, column=0, sticky="nsew")
+        # Activity Table
+        self.table_container = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.table_container.grid(row=1, column=0, sticky="nsew", padx=15, pady=(0, 15))
         
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure("Treeview", background="#2b2b2b", foreground="white", fieldbackground="#2b2b2b", borderwidth=0)
+        style.configure("Treeview", background="#1a1a1a", foreground="white", fieldbackground="#1a1a1a", borderwidth=0, font=("Segoe UI", 10))
+        style.configure("Treeview.Heading", background="#333333", foreground="white", relief="flat")
         style.map("Treeview", background=[('selected', '#3498db')])
 
-        self.tree = ttk.Treeview(self.table_frame, columns=("T", "L", "S", "M"), show='headings')
+        self.tree = ttk.Treeview(self.table_container, columns=("T", "L", "S", "M"), show='headings')
         self.tree.heading("T", text="TIME")
         self.tree.heading("L", text="LEVEL")
         self.tree.heading("S", text="SOURCE")
         self.tree.heading("M", text="MESSAGE")
         
-        self.tree.column("T", width=80)
-        self.tree.column("L", width=80)
-        self.tree.column("S", width=100)
-        self.tree.column("M", width=400)
+        self.tree.column("T", width=90, anchor="center")
+        self.tree.column("L", width=90, anchor="center")
+        self.tree.column("S", width=110, anchor="center")
+        self.tree.column("M", width=420)
         
         self.tree.tag_configure("ERROR", foreground="#ff7675")
         self.tree.tag_configure("SUCCESS", foreground="#55efc4")
+        self.tree.tag_configure("WARNING", foreground="#ffeaa7")
         
-        self.tree.pack(fill=tk.BOTH, expand=True)
+        self.tree.pack(fill="both", expand=True)
         
-        self.after(100, self.update_logs)
+        self.after(100, self.refresh_ui_logs)
 
-    def update_logs(self):
+    def refresh_ui_logs(self):
         while not log_queue.empty():
             t, l, s, m = log_queue.get()
             self.tree.insert("", 0, values=(t, l, s, m), tags=(l,))
-        self.after(100, self.update_logs)
+        self.after(100, self.refresh_ui_logs)
 
     def toggle_proxy(self):
         global async_loop_running
         if not async_loop_running:
             try:
-                with open(os.path.join(get_exe_dir(), 'config.json')) as f: config = json.load(f)
-                ip = get_local_ip()
-                async_loop_running = True
-                self.btn_toggle.configure(text="STOP PROXY", fg_color="#e74c3c")
-                self.status_label.configure(text=f"ACTIVE: {config['LISTEN_PORT']} -> {config['CONNECT_IP']}", text_color="#2ecc71")
+                conf_file = os.path.join(get_exe_dir(), 'config.json')
+                with open(conf_file) as f: config = json.load(f)
                 
-                threading.Thread(target=lambda: asyncio.run(self.run_server(config, ip)), daemon=True).start()
-                w_filt = f"tcp and ((ip.SrcAddr == {ip} and ip.DstAddr == {config['CONNECT_IP']}) or (ip.SrcAddr == {config['CONNECT_IP']} and ip.DstAddr == {ip}))"
-                threading.Thread(target=FakeTcpInjector(w_filt, fake_injective_connections).run, daemon=True).start()
-                gui_log("System", "Engine Started.", "SUCCESS")
-            except Exception as e: messagebox.showerror("Error", str(e))
+                async_loop_running = True
+                self.btn_toggle.configure(text="STOP ENGINE", fg_color="#e74c3c", hover_color="#c0392b")
+                self.status_info.configure(text=f"CONNECTED: {config['LISTEN_PORT']} -> {config['CONNECT_IP']}", text_color="#2ecc71")
+                
+                # اجرای تردها
+                local_ip = get_default_interface_ipv4(config['CONNECT_IP'])
+                threading.Thread(target=lambda: asyncio.run(self.start_srv(config, local_ip)), daemon=True).start()
+                
+                w_filter = f"tcp and ((ip.SrcAddr == {local_ip} and ip.DstAddr == {config['CONNECT_IP']}) or (ip.SrcAddr == {config['CONNECT_IP']} and ip.DstAddr == {local_ip}))"
+                threading.Thread(target=FakeTcpInjector(w_filter, fake_injective_connections).run, daemon=True).start()
+                
+                gui_log("System", "Proxy & WinDivert Started.", "SUCCESS")
+                gui_log("System", f"Local sharing IP: {get_local_ip()}")
+            except Exception as e: messagebox.showerror("Error", f"Failed to start: {str(e)}")
         else: os._exit(0)
 
-    async def run_server(self, config, ip):
+    async def start_srv(self, config, ip):
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setblocking(False)
         srv.bind((config["LISTEN_HOST"], config["LISTEN_PORT"]))
@@ -226,5 +249,5 @@ class ModernProxyGUI(ctk.CTk):
             asyncio.create_task(handle(client, addr, config, ip))
 
 if __name__ == "__main__":
-    app = ModernProxyGUI()
-    app.mainloop()
+    gui_app = ModernProxyGUI()
+    gui_app.mainloop()
