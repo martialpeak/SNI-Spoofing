@@ -7,8 +7,9 @@ import traceback
 import threading
 import json
 import queue
+import time
 import tkinter as tk
-from tkinter import scrolledtext, font, messagebox
+from tkinter import ttk, font, messagebox
 
 from fake_tcp import FakeInjectiveConnection, FakeTcpInjector
 
@@ -58,8 +59,13 @@ class ClientHelloMaker:
         return cls.static1 + rnd + cls.static2 + sess_id + cls.static3 + server_name_ext + cls.static4 + key_share + cls.static5 + padding_ext
 
 # =====================================================================
-# هسته اصلی پروکسی و پردازش
+# هسته پروکسی
 # =====================================================================
+log_queue = queue.Queue()
+
+def gui_log(source, message, level="INFO"):
+    log_queue.put((time.strftime("%H:%M:%S"), level, source, message))
+
 def get_exe_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
@@ -67,7 +73,6 @@ def get_exe_dir():
 
 fake_injective_connections: dict[tuple, FakeInjectiveConnection] = {}
 async_loop_running = False
-proxy_thread = None
 
 async def relay_main_loop(sock_1: socket.socket, sock_2: socket.socket, peer_task: asyncio.Task, first_prefix_data: bytes):
     try:
@@ -79,7 +84,7 @@ async def relay_main_loop(sock_1: socket.socket, sock_2: socket.socket, peer_tas
                 data = first_prefix_data + data
                 first_prefix_data = b""
             await loop.sock_sendall(sock_2, data)
-    except Exception: pass
+    except: pass
     finally:
         if peer_task and not peer_task.done(): peer_task.cancel()
         try: sock_1.shutdown(socket.SHUT_RDWR)
@@ -89,8 +94,10 @@ async def relay_main_loop(sock_1: socket.socket, sock_2: socket.socket, peer_tas
         sock_1.close()
         sock_2.close()
 
-async def handle(incoming_sock: socket.socket, config: dict, interface_ip: str):
+async def handle(incoming_sock: socket.socket, addr, config: dict, interface_ip: str):
     fake_injective_conn = None
+    gui_log("Client", f"New Connection from {addr[0]}:{addr[1]}")
+    
     try:
         loop = asyncio.get_running_loop()
         connect_ip = config.get("CONNECT_IP")
@@ -103,28 +110,36 @@ async def handle(incoming_sock: socket.socket, config: dict, interface_ip: str):
         outgoing_sock.setblocking(False)
         outgoing_sock.bind((interface_ip, 0))
         
-        try:
-            outgoing_sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            outgoing_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 11)
-        except AttributeError: pass 
-            
         src_port = outgoing_sock.getsockname()[1]
         fake_injective_conn = FakeInjectiveConnection(outgoing_sock, interface_ip, connect_ip, src_port, connect_port, fake_data, "wrong_seq", incoming_sock)
         fake_injective_connections[fake_injective_conn.id] = fake_injective_conn
         
-        try: await loop.sock_connect(outgoing_sock, (connect_ip, connect_port))
-        except Exception: return 
+        gui_log("Proxy", f"Connecting to Target: {connect_ip}...")
+        
+        try:
+            await asyncio.wait_for(loop.sock_connect(outgoing_sock, (connect_ip, connect_port)), timeout=5)
+            gui_log("Proxy", "Connection to Target Successful.", "SUCCESS")
+        except Exception as e:
+            gui_log("Proxy", f"Failed to connect to Target: {str(e)}", "ERROR")
+            return 
 
         try:
             await asyncio.wait_for(fake_injective_conn.t2a_event.wait(), 2)
-            if fake_injective_conn.t2a_msg == "unexpected_close": return
-        except asyncio.TimeoutError: return 
+            if fake_injective_conn.t2a_msg == "unexpected_close": 
+                gui_log("DPI", "Unexpected Close during handshake", "WARNING")
+                return
+        except asyncio.TimeoutError:
+            gui_log("DPI", "Handshake timeout", "WARNING")
+            return 
 
         fake_injective_conn.monitor = False
+        gui_log("Relay", "Tunnel established. Relaying data...")
+        
         oti_task = asyncio.create_task(relay_main_loop(outgoing_sock, incoming_sock, asyncio.current_task(), b""))
         await relay_main_loop(incoming_sock, outgoing_sock, oti_task, b"")
 
-    except Exception: pass
+    except Exception as e:
+        gui_log("System", f"Handle Error: {str(e)}", "ERROR")
     finally:
         if fake_injective_conn:
             fake_injective_conn.monitor = False
@@ -133,6 +148,7 @@ async def handle(incoming_sock: socket.socket, config: dict, interface_ip: str):
         except: pass
         try: incoming_sock.close()
         except: pass
+        gui_log("Client", f"Connection {addr[0]} Closed.")
 
 async def run_proxy_server(config, interface_ip):
     mother_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -141,122 +157,107 @@ async def run_proxy_server(config, interface_ip):
     mother_sock.bind((config.get("LISTEN_HOST", "0.0.0.0"), config.get("LISTEN_PORT", 40443)))
     mother_sock.listen()
     
-    print(f"[*] Proxy Server Started!")
-    print(f"[*] Listening on: {config.get('LISTEN_HOST')}:{config.get('LISTEN_PORT')}")
-    print(f"[*] Target: {config.get('CONNECT_IP')}:{config.get('CONNECT_PORT')}")
-    print(f"[*] Faking SNI: {config.get('FAKE_SNI')}")
-    print("[*] Waiting for client connections...\n")
+    gui_log("System", "Proxy Server initialized.")
     
     loop = asyncio.get_running_loop()
     while async_loop_running:
         try:
             incoming_sock, addr = await loop.sock_accept(mother_sock)
             incoming_sock.setblocking(False)
-            print(f"[+] New connection from {addr[0]}:{addr[1]}")
-            asyncio.create_task(handle(incoming_sock, config, interface_ip))
-        except Exception:
+            asyncio.create_task(handle(incoming_sock, addr, config, interface_ip))
+        except:
             await asyncio.sleep(0.1)
 
-def start_background_tasks(config):
-    global async_loop_running
-    async_loop_running = True
-    interface_ip = get_default_interface_ipv4(config.get("CONNECT_IP", "8.8.8.8"))
-    
-    if not interface_ip:
-        print("[!] Error: No internet connection found.")
-        return
-
-    # استارت WinDivert
-    w_filter = f"tcp and ((ip.SrcAddr == {interface_ip} and ip.DstAddr == {config['CONNECT_IP']}) or (ip.SrcAddr == {config['CONNECT_IP']} and ip.DstAddr == {interface_ip}))"
-    fake_tcp_injector = FakeTcpInjector(w_filter, fake_injective_connections)
-    threading.Thread(target=fake_tcp_injector.run, daemon=True).start()
-    print("[*] WinDivert Packet Injector Started.")
-
-    # استارت سرور پروکسی
-    asyncio.run(run_proxy_server(config, interface_ip))
-
 # =====================================================================
-# رابط کاربری گرافیکی (GUI) و هدایت لاگ‌ها
+# رابط کاربری گرافیکی مدرن
 # =====================================================================
-class RedirectText:
-    """کلاسی برای انتقال لاگ‌های کنسول به داخل تکست‌باکس محیط گرافیکی (Thread-Safe)"""
-    def __init__(self, text_widget):
-        self.text_widget = text_widget
-        self.log_queue = queue.Queue()
-        self.update_widget()
-
-    def write(self, string):
-        self.log_queue.put(string)
-
-    def flush(self): pass
-
-    def update_widget(self):
-        while not self.log_queue.empty():
-            msg = self.log_queue.get()
-            self.text_widget.configure(state='normal')
-            self.text_widget.insert(tk.END, msg)
-            self.text_widget.see(tk.END)
-            self.text_widget.configure(state='disabled')
-        self.text_widget.after(100, self.update_widget)
-
 class ProxyGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("SNI Spoofing Proxy - Patterniha")
-        self.root.geometry("600x450")
-        self.root.configure(bg="#1E1E1E")
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-
-        custom_font = font.Font(family="Consolas", size=10)
-
-        # Header Frame
-        header_frame = tk.Frame(root, bg="#1E1E1E")
-        header_frame.pack(fill=tk.X, pady=10)
-
-        self.lbl_status = tk.Label(header_frame, text="Status: Stopped", fg="#FF5555", bg="#1E1E1E", font=("Arial", 12, "bold"))
-        self.lbl_status.pack(side=tk.LEFT, padx=20)
-
-        self.btn_start = tk.Button(header_frame, text="Start Proxy", bg="#4CAF50", fg="white", font=("Arial", 10, "bold"), width=12, command=self.start_proxy)
-        self.btn_start.pack(side=tk.RIGHT, padx=20)
-
-        # Log Area
-        self.log_area = scrolledtext.ScrolledText(root, wrap=tk.WORD, bg="#000000", fg="#00FF00", font=custom_font, state='disabled')
-        self.log_area.pack(padx=20, pady=10, fill=tk.BOTH, expand=True)
-
-        # Redirect Console Output
-        sys.stdout = RedirectText(self.log_area)
-        sys.stderr = RedirectText(self.log_area)
-
-        print("=== SNI Spoofing Proxy GUI ===")
-        print("Ready to start. Make sure config.json is in the folder.\n")
-
-    def start_proxy(self):
-        global proxy_thread
-        config_path = os.path.join(get_exe_dir(), 'config.json')
+        self.root.title("SNI Spoofing Proxy V2")
+        self.root.geometry("800x500")
+        self.root.configure(bg="#2b2b2b")
         
-        try:
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-        except FileNotFoundError:
-            print("[!] Error: config.json not found next to the executable!")
-            messagebox.showerror("Error", "config.json file is missing!")
-            return
-
-        self.btn_start.config(state=tk.DISABLED, text="Running...")
-        self.lbl_status.config(text="Status: Running", fg="#4CAF50")
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure("Treeview", background="#1e1e1e", foreground="white", fieldbackground="#1e1e1e", rowheight=25)
+        style.map("Treeview", background=[('selected', '#3a3a3a')])
         
-        # اجرای سرور در پس زمینه تا فرم گرافیکی قفل نکند
-        proxy_thread = threading.Thread(target=start_background_tasks, args=(config,), daemon=True)
-        proxy_thread.start()
+        # Main Layout
+        main_frame = ttk.Frame(root, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Top Panel: Info and Control
+        top_panel = ttk.LabelFrame(main_frame, text=" Server Information ", padding="10")
+        top_panel.pack(fill=tk.X, pady=(0, 10))
+        
+        self.info_text = tk.StringVar(value="Status: Not Running | Target: None")
+        ttk.Label(top_panel, textvariable=self.info_text, font=("Segoe UI", 10)).pack(side=tk.LEFT)
+        
+        self.btn_toggle = ttk.Button(top_panel, text="Start Proxy", command=self.toggle_proxy)
+        self.btn_toggle.pack(side=tk.RIGHT)
+        
+        # Bottom Panel: Tabular Logs
+        log_frame = ttk.LabelFrame(main_frame, text=" Activity Logs ", padding="5")
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        
+        columns = ("time", "level", "source", "message")
+        self.tree = ttk.Treeview(log_frame, columns=columns, show='headings')
+        self.tree.heading("time", text="Time")
+        self.tree.heading("level", text="Level")
+        self.tree.heading("source", text="Source")
+        self.tree.heading("message", text="Message")
+        
+        self.tree.column("time", width=80, anchor=tk.CENTER)
+        self.tree.column("level", width=80, anchor=tk.CENTER)
+        self.tree.column("source", width=100, anchor=tk.CENTER)
+        self.tree.column("message", width=450)
+        
+        # Tags for Colors
+        self.tree.tag_configure("ERROR", foreground="#ff6b6b")
+        self.tree.tag_configure("SUCCESS", foreground="#51cf66")
+        self.tree.tag_configure("WARNING", foreground="#fcc419")
+        
+        scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscroll=scrollbar.set)
+        
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.root.after(100, self.process_logs)
 
-    def on_closing(self):
+    def process_logs(self):
+        while not log_queue.empty():
+            t, level, src, msg = log_queue.get()
+            self.tree.insert("", tk.END, values=(t, level, src, msg), tags=(level,))
+            self.tree.yview_moveto(1)
+        self.root.after(100, self.process_logs)
+
+    def toggle_proxy(self):
         global async_loop_running
-        print("Stopping services...")
-        async_loop_running = False
-        self.root.destroy()
-        os._exit(0)  # خروج کامل و بستن تمام پردازش‌های پس‌زمینه
+        if not async_loop_running:
+            config_path = os.path.join(get_exe_dir(), 'config.json')
+            try:
+                with open(config_path, 'r') as f: config = json.load(f)
+                interface_ip = get_default_interface_ipv4(config['CONNECT_IP'])
+                
+                async_loop_running = True
+                self.btn_toggle.config(text="Stop Proxy")
+                self.info_text.set(f"Running on {config['LISTEN_PORT']} | Target: {config['CONNECT_IP']}")
+                
+                # Background threads
+                threading.Thread(target=lambda: asyncio.run(run_proxy_server(config, interface_ip)), daemon=True).start()
+                w_filter = f"tcp and ((ip.SrcAddr == {interface_ip} and ip.DstAddr == {config['CONNECT_IP']}) or (ip.SrcAddr == {config['CONNECT_IP']} and ip.DstAddr == {interface_ip}))"
+                threading.Thread(target=FakeTcpInjector(w_filter, fake_injective_connections).run, daemon=True).start()
+                
+                gui_log("System", "All services started successfully.", "SUCCESS")
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+        else:
+            async_loop_running = False
+            os._exit(0)
 
 if __name__ == "__main__":
-    app_root = tk.Tk()
-    gui = ProxyGUI(app_root)
-    app_root.mainloop()
+    root = tk.Tk()
+    app = ProxyGUI(root)
+    root.mainloop()
