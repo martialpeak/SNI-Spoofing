@@ -9,10 +9,11 @@ import queue
 import time
 import subprocess
 import ipaddress
+import tkinter as tk  # <--- این خط جا مانده بود که اضافه شد!
 import customtkinter as ctk
 from tkinter import ttk, messagebox
 
-# تنظیم تایم‌اوت سراسری شبکه برای جلوگیری از فریز شدن کامل برنامه در اینترنت ایران
+# تنظیم تایم‌اوت سراسری شبکه
 socket.setdefaulttimeout(3.0)
 
 # تنظیمات تم مدرن
@@ -147,12 +148,12 @@ def gui_log(source, message, level="INFO"):
 class ModernProxyGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("SNI Ultimate Analyzer & Proxy v3.3 - STABLE")
+        self.title("SNI Ultimate Analyzer & Proxy v3.4 - FIXED SCANNER")
         self.geometry("1250x750")
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
         
-        self.server_socket = None # برای بستن صحیح سرور
+        self.server_socket = None
 
         # Sidebar
         self.sidebar = ctk.CTkFrame(self, width=280, corner_radius=0)
@@ -212,8 +213,11 @@ class ModernProxyGUI(ctk.CTk):
         self.after(100, self.update_logs)
 
     def add_scan_result_safe(self, sni, ip, provider, ping_str, quality):
-        """اضافه کردن امن داده‌ها به جدول گرافیکی (جلوگیری از کرش)"""
-        self.scan_tree.insert("", tk.END, values=(sni, ip, provider, ping_str, quality))
+        """اضافه کردن امن داده‌ها با بررسی خطا"""
+        try:
+            self.scan_tree.insert("", tk.END, values=(sni, ip, provider, ping_str, quality))
+        except Exception as e:
+            gui_log("System", f"UI Table Error: {str(e)}", "ERROR")
 
     def start_bulk_scan(self):
         self.btn_scan.configure(state="disabled", text="Analyzing...")
@@ -238,13 +242,11 @@ class ModernProxyGUI(ctk.CTk):
                     if ping == 999: quality = "🔴 DEAD"
                     
                     ping_str = f"{ping}ms" if ping < 999 else "---"
-                    # آپدیت جدول از طریق Thread امن
                     self.after(0, self.add_scan_result_safe, sni, ip, provider, ping_str, quality)
                 except Exception as e:
                     self.after(0, self.add_scan_result_safe, sni, "Unresolved", "Unknown", "---", "🚫 BLOCKED")
             
             gui_log("Scanner", "Analysis Complete.", "SUCCESS")
-            # بازگرداندن دکمه از طریق Thread امن
             self.after(0, lambda: self.btn_scan.configure(state="normal", text="🔍 SMART BATCH TEST"))
 
         threading.Thread(target=run, daemon=True).start()
@@ -270,7 +272,7 @@ class ModernProxyGUI(ctk.CTk):
         while not log_queue.empty():
             t, l, s, m = log_queue.get()
             self.log_tree.insert("", 0, values=(t, l, s, m))
-            self.log_tree.yview_moveto(1) # اسکرول خودکار به پایین
+            self.log_tree.yview_moveto(1)
         self.after(100, self.update_logs)
 
     # =====================================================================
@@ -290,10 +292,8 @@ class ModernProxyGUI(ctk.CTk):
                 local_ip = get_local_ip()
                 gui_log("System", f"Starting Proxy on Port {config['LISTEN_PORT']}", "INFO")
 
-                # اجرای سرور در پس‌زمینه
                 threading.Thread(target=lambda: asyncio.run(self.run_srv(config, local_ip)), daemon=True).start()
                 
-                # اجرای WinDivert
                 if "FakeTcpInjector" in globals():
                     w_filter = f"tcp and ((ip.SrcAddr == {local_ip} and ip.DstAddr == {target_ip}) or (ip.SrcAddr == {target_ip} and ip.DstAddr == {local_ip}))"
                     threading.Thread(target=FakeTcpInjector(w_filter, fake_injective_connections).run, daemon=True).start()
@@ -303,7 +303,6 @@ class ModernProxyGUI(ctk.CTk):
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to start proxy: {str(e)}")
         else:
-            # === متوقف کردن امن برنامه بدون بسته شدن ===
             async_loop_running = False
             if self.server_socket:
                 try: self.server_socket.close()
@@ -341,10 +340,8 @@ class ModernProxyGUI(ctk.CTk):
             out_sock.setblocking(False)
             out_sock.bind((interface_ip, 0))
             
-            # ساخت پکت فیک کلاینت هلو
             f_data = ClientHelloMaker.get_client_hello_with(os.urandom(32), os.urandom(32), config["FAKE_SNI"].encode(), os.urandom(32))
             
-            # ثبت در دیکشنری برای WinDivert
             if "FakeInjectiveConnection" in globals():
                 conn = FakeInjectiveConnection(out_sock, interface_ip, config["CONNECT_IP"], out_sock.getsockname()[1], config["CONNECT_PORT"], f_data, "wrong_seq", client)
                 fake_injective_connections[conn.id] = conn
