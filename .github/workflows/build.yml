@@ -3,11 +3,11 @@ name: Build Python Proxy and Release
 on:
   push:
     tags:
-      - 'v*' # این اکشن فقط زمانی اجرا می‌شود که تگ جدیدی مثل v1.0.0 بزنید
+      - 'v*'
 
 jobs:
   build:
-    runs-on: windows-latest # چون pydivert نیازمند ویندوز است، سرور باید ویندوزی باشد
+    runs-on: windows-latest
 
     steps:
       - name: Checkout code
@@ -16,26 +16,23 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11' # نسخه پایدار پایتون
+          python-version: '3.11'
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller pydivert
-          # اگر پیش‌نیاز دیگری در requirements.txt دارید، آن را هم می‌توانید اینجا نصب کنید
-          # pip install -r requirements.txt
 
       - name: Build EXE with PyInstaller
         run: |
-          pyinstaller --onefile --console --uac-admin --collect-data pydivert --hidden-import network_tools --hidden-import packet_templates --hidden-import fake_tcp --hidden-import injecter --hidden-import monitor_connection main.py
+          pyinstaller --onefile --windowed --uac-admin --collect-data pydivert --hidden-import network_tools --hidden-import packet_templates --hidden-import fake_tcp --hidden-import injecter --hidden-import monitor_connection main.py
 
       - name: Create Release and Upload
         uses: softprops/action-gh-release@v1
         with:
-          files: dist/main.exe # فایلی که پای‌اینستالر می‌سازد در این مسیر قرار می‌گیرد
+          files: dist/main.exe
           name: Proxy Release ${{ github.ref_name }}
           body: |
-            فایل اجرایی پروکسی. 
-            **توجه:** برای اجرای این برنامه، حتماً فایل `config.json` باید در کنار فایل `main.exe` قرار داشته باشد.
+            نسخه جدید به همراه رابط کاربری گرافیکی (GUI).
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
