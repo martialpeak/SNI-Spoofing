@@ -1,4 +1,42 @@
-- name: Build EXE with PyInstaller
+name: Build Python Proxy and Release
+
+on:
+  push:
+    tags:
+      - 'v*' # زمانی اجرا می‌شود که تگ جدیدی (مانند v2.0) بزنید
+
+permissions:
+  contents: write # اجازه دادن به گیت‌هاب برای آپلود فایل در بخش Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
         run: |
-          pip install customtkinter
+          python -m pip install --upgrade pip
+          pip install pyinstaller pydivert customtkinter
+
+      - name: Build EXE with PyInstaller
+        run: |
           pyinstaller --onefile --windowed --uac-admin --collect-data pydivert --collect-all customtkinter main.py
+
+      - name: Create Release and Upload
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/main.exe
+          name: Proxy Release ${{ github.ref_name }}
+          body: |
+            نسخه نهایی با رابط کاربری مدرن (CustomTkinter).
+            **نکته:** فایل config.json را در کنار فایل اجرایی قرار دهید.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
