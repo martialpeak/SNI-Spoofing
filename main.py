@@ -7,9 +7,8 @@ import threading
 import json
 import queue
 import time
-import subprocess
 import ipaddress
-import tkinter as tk  # <--- این خط جا مانده بود که اضافه شد!
+import tkinter as tk
 import customtkinter as ctk
 from tkinter import ttk, messagebox
 
@@ -60,7 +59,7 @@ def detect_provider(ip_str):
     except: return "❓ Unknown"
 
 # =====================================================================
-# توابع پایه و لاگ‌گیر
+# توابع پایه، لاگ‌گیر و TCP Ping هوشمند
 # =====================================================================
 def get_exe_dir():
     if getattr(sys, 'frozen', False): return os.path.dirname(sys.executable)
@@ -75,17 +74,15 @@ def write_to_log_file(msg):
             f.flush()
     except: pass
 
-def get_ping(ip):
+def get_tcp_ping(ip, port=443, timeout=1.5):
+    """استفاده از اتصال TCP به جای پینگ ویندوز برای دور زدن محدودیت‌های ICMP"""
     try:
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        process = subprocess.Popen(['ping', '-n', '1', '-w', '1000', ip], 
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo)
-        stdout, _ = process.communicate(timeout=2.0)
-        out = stdout.decode('cp1252')
-        if "Average =" in out: return int(out.split("Average =")[-1].strip().replace("ms", ""))
+        start_time = time.time()
+        with socket.create_connection((ip, port), timeout=timeout):
+            pass
+        return int((time.time() - start_time) * 1000)
+    except:
         return 999
-    except: return 999
 
 def get_local_ip():
     try:
@@ -135,6 +132,7 @@ class ClientHelloMaker:
 log_queue = queue.Queue()
 async_loop_running = False
 fake_injective_connections = {}
+active_divert_ips = set() # جلوگیری از تداخل درایور در ری‌استارت‌های متعدد
 
 def gui_log(source, message, level="INFO"):
     icons = {"INFO": "ℹ️", "SUCCESS": "✅", "ERROR": "❌", "WARNING": "⚠️", "Scanner": "🔍", "DPI": "🛡️", "Relay": "⚡"}
@@ -148,7 +146,7 @@ def gui_log(source, message, level="INFO"):
 class ModernProxyGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("SNI Ultimate Analyzer & Proxy v3.4 - FIXED SCANNER")
+        self.title("SNI Ultimate TCP-Scanner & Proxy v3.5 - ROCK SOLID")
         self.geometry("1250x750")
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -177,7 +175,7 @@ class ModernProxyGUI(ctk.CTk):
         self.main_work.grid_columnconfigure(0, weight=1)
 
         # Scanner Table
-        ctk.CTkLabel(self.main_work, text="📊 Dynamic Infrastructure Analysis", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=20, pady=(20, 5), sticky="w")
+        ctk.CTkLabel(self.main_work, text="📊 Dynamic TCP Infrastructure Analysis", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, padx=20, pady=(20, 5), sticky="w")
         style = ttk.Style()
         style.theme_use("clam")
         style.configure("Treeview", background="#1a1a1a", foreground="#ecf0f1", fieldbackground="#1a1a1a", rowheight=35, font=("Segoe UI", 10))
@@ -187,7 +185,7 @@ class ModernProxyGUI(ctk.CTk):
         self.scan_tree.heading("sni", text="DOMAIN (SNI)")
         self.scan_tree.heading("ip", text="RESOLVED IP")
         self.scan_tree.heading("provider", text="DETECTED INFRASTRUCTURE")
-        self.scan_tree.heading("ping", text="LATENCY")
+        self.scan_tree.heading("ping", text="TCP LATENCY")
         self.scan_tree.heading("status", text="QUALITY")
         self.scan_tree.column("sni", width=220)
         self.scan_tree.column("ip", width=140, anchor="center")
@@ -213,14 +211,11 @@ class ModernProxyGUI(ctk.CTk):
         self.after(100, self.update_logs)
 
     def add_scan_result_safe(self, sni, ip, provider, ping_str, quality):
-        """اضافه کردن امن داده‌ها با بررسی خطا"""
-        try:
-            self.scan_tree.insert("", tk.END, values=(sni, ip, provider, ping_str, quality))
-        except Exception as e:
-            gui_log("System", f"UI Table Error: {str(e)}", "ERROR")
+        try: self.scan_tree.insert("", tk.END, values=(sni, ip, provider, ping_str, quality))
+        except Exception as e: gui_log("System", f"UI Table Error: {str(e)}", "ERROR")
 
     def start_bulk_scan(self):
-        self.btn_scan.configure(state="disabled", text="Analyzing...")
+        self.btn_scan.configure(state="disabled", text="Analyzing TCP...")
         for i in self.scan_tree.get_children(): self.scan_tree.delete(i)
         
         def run():
@@ -229,24 +224,24 @@ class ModernProxyGUI(ctk.CTk):
                 with open(path, "w") as f: f.write("auth.vercel.com\ndiscord.com\ncloudflare.com")
             
             with open(path, "r") as f: snis = [l.strip() for l in f if l.strip()]
-            gui_log("Scanner", f"Starting deep DNS analysis for {len(snis)} nodes...", "INFO")
+            gui_log("Scanner", f"Starting TCP Deep Scan for {len(snis)} nodes...", "INFO")
             
             for sni in snis:
                 try:
                     ip = socket.gethostbyname(sni)
                     provider = detect_provider(ip)
-                    ping = get_ping(ip)
+                    ping = get_tcp_ping(ip)  # استفاده از پینگ جدید و قدرتمند TCP
                     
-                    quality = "🟢 EXCELLENT" if ping < 150 else "🟡 STABLE"
+                    quality = "🟢 EXCELLENT" if ping < 200 else "🟡 STABLE"
                     if ping > 400: quality = "🟠 SLOW"
-                    if ping == 999: quality = "🔴 DEAD"
+                    if ping == 999: quality = "🔴 OFFLINE"
                     
                     ping_str = f"{ping}ms" if ping < 999 else "---"
                     self.after(0, self.add_scan_result_safe, sni, ip, provider, ping_str, quality)
                 except Exception as e:
                     self.after(0, self.add_scan_result_safe, sni, "Unresolved", "Unknown", "---", "🚫 BLOCKED")
             
-            gui_log("Scanner", "Analysis Complete.", "SUCCESS")
+            gui_log("Scanner", "TCP Analysis Complete.", "SUCCESS")
             self.after(0, lambda: self.btn_scan.configure(state="normal", text="🔍 SMART BATCH TEST"))
 
         threading.Thread(target=run, daemon=True).start()
@@ -279,7 +274,7 @@ class ModernProxyGUI(ctk.CTk):
     # بخش حیاتی پروکسی
     # =====================================================================
     def toggle_proxy(self):
-        global async_loop_running
+        global async_loop_running, active_divert_ips
         if not async_loop_running:
             try:
                 conf_path = os.path.join(get_exe_dir(), 'config.json')
@@ -294,12 +289,17 @@ class ModernProxyGUI(ctk.CTk):
 
                 threading.Thread(target=lambda: asyncio.run(self.run_srv(config, local_ip)), daemon=True).start()
                 
+                # مدیریت هوشمند پردازش WinDivert
                 if "FakeTcpInjector" in globals():
-                    w_filter = f"tcp and ((ip.SrcAddr == {local_ip} and ip.DstAddr == {target_ip}) or (ip.SrcAddr == {target_ip} and ip.DstAddr == {local_ip}))"
-                    threading.Thread(target=FakeTcpInjector(w_filter, fake_injective_connections).run, daemon=True).start()
-                    gui_log("DPI", "WinDivert Engine Activated.", "SUCCESS")
+                    if target_ip not in active_divert_ips:
+                        w_filter = f"tcp and ((ip.SrcAddr == {local_ip} and ip.DstAddr == {target_ip}) or (ip.SrcAddr == {target_ip} and ip.DstAddr == {local_ip}))"
+                        threading.Thread(target=FakeTcpInjector(w_filter, fake_injective_connections).run, daemon=True).start()
+                        active_divert_ips.add(target_ip)
+                        gui_log("DPI", f"WinDivert Engine Activated for {target_ip}", "SUCCESS")
+                else:
+                    gui_log("DPI", "WinDivert Module Missing! Bypass may fail.", "WARNING")
 
-                gui_log("System", f"Engine Engaged! Target: {target_ip}", "SUCCESS")
+                gui_log("System", f"Engine Engaged! Ready for traffic.", "SUCCESS")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to start proxy: {str(e)}")
         else:
@@ -310,7 +310,7 @@ class ModernProxyGUI(ctk.CTk):
             
             fake_injective_connections.clear()
             self.btn_toggle.configure(text="▶️ START PROXY", fg_color="#2ecc71", hover_color="#27ae60")
-            gui_log("System", "Proxy Engine Stopped Gracefully.", "WARNING")
+            gui_log("System", "Proxy Engine Stopped. Ready to reload.", "WARNING")
 
     async def run_srv(self, config, ip):
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -346,20 +346,24 @@ class ModernProxyGUI(ctk.CTk):
                 conn = FakeInjectiveConnection(out_sock, interface_ip, config["CONNECT_IP"], out_sock.getsockname()[1], config["CONNECT_PORT"], f_data, "wrong_seq", client)
                 fake_injective_connections[conn.id] = conn
             
-            gui_log("Proxy", f"[{cid}] Connecting to {config['CONNECT_IP']}...", "INFO")
+            gui_log("Proxy", f"[{cid}] TCP Tunneling to {config['CONNECT_IP']}...", "INFO")
             await asyncio.wait_for(loop.sock_connect(out_sock, (config["CONNECT_IP"], config["CONNECT_PORT"])), 5)
             gui_log("Proxy", f"[{cid}] Connected! Spoofing SNI...", "SUCCESS")
 
+            # حل مشکل قطعی اتصال با گذر هوشمند از خطای تایم‌اوت DPI
             if "FakeInjectiveConnection" in globals():
-                await asyncio.wait_for(conn.t2a_event.wait(), 2)
+                try:
+                    await asyncio.wait_for(conn.t2a_event.wait(), 2)
+                except asyncio.TimeoutError:
+                    gui_log("DPI", f"[{cid}] Handshake timeout bypassed. Continuing relay...", "WARNING")
                 conn.monitor = False
             
-            gui_log("Relay", f"[{cid}] Tunnel established.", "Relay")
+            gui_log("Relay", f"[{cid}] Tunnel successfully established. Transmitting data ⚡", "SUCCESS")
             
             task = asyncio.create_task(self.relay(out_sock, client, asyncio.current_task()))
             await self.relay(client, out_sock, task)
         except Exception as e:
-            gui_log("Proxy", f"[{cid}] Connection failed.", "ERROR")
+            gui_log("Proxy", f"[{cid}] Connection terminated.", "ERROR")
         finally:
             if 'conn' in locals() and "FakeInjectiveConnection" in globals(): 
                 fake_injective_connections.pop(conn.id, None)
