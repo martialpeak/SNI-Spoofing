@@ -3,10 +3,10 @@ name: Build Python Proxy and Release
 on:
   push:
     tags:
-      - 'v*' # زمانی اجرا می‌شود که تگ جدیدی (مانند v2.0) بزنید
+      - 'v*'
 
 permissions:
-  contents: write # اجازه دادن به گیت‌هاب برای آپلود فایل در بخش Release
+  contents: write
 
 jobs:
   build:
@@ -36,7 +36,6 @@ jobs:
           files: dist/main.exe
           name: Proxy Release ${{ github.ref_name }}
           body: |
-            نسخه نهایی با رابط کاربری مدرن (CustomTkinter).
-            **نکته:** فایل config.json را در کنار فایل اجرایی قرار دهید.
+            نسخه نهایی با رابط کاربری فوق مدرن و سیستم لاگ‌دهی عیب‌یاب.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
