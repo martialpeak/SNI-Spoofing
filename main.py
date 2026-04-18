@@ -6,8 +6,8 @@ import traceback
 import threading
 import json
 
-from network_tools import get_default_interface_ipv4
-from packet_templates import ClientHelloMaker
+from utils.network_tools import get_default_interface_ipv4
+from utils.packet_templates import ClientHelloMaker
 from fake_tcp import FakeInjectiveConnection, FakeTcpInjector
 
 def get_exe_dir():
